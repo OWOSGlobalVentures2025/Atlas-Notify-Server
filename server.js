@@ -1,4 +1,4 @@
-// server.js (Complete Stripe/Postgres Integration)
+// server.js (Complete Stripe/Postgres Integration with Auto-Migration)
 import express from 'express';
 import Stripe from 'stripe';
 import fetch from 'node-fetch';
@@ -19,10 +19,80 @@ const PORT = process.env.PORT || 10000;
 const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: '2023-10-16' });
 const pool = new Pool({ connectionString: DATABASE_URL });
 
-// Test DB Connection on startup
-pool.connect()
-    .then(() => console.log('✅ PostgreSQL connected for Atlas Notify!'))
-    .catch(err => console.error('❌ Database connection error:', err.stack));
+// --- DATABASE MIGRATION/CONNECTION TEST ---
+async function runMigrations() {
+    console.log('Attempting to connect to PostgreSQL and run migrations...');
+    const client = await pool.connect();
+    try {
+        // SQL commands to create all four tables (CREATE TABLE IF NOT EXISTS prevents errors if run twice)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS users (
+              id SERIAL PRIMARY KEY,
+              email TEXT UNIQUE NOT NULL,
+              stripe_customer_id TEXT,
+              created_at TIMESTAMP DEFAULT now()
+            );
+        `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS memberships (
+              id SERIAL PRIMARY KEY,
+              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              stripe_session_id TEXT,
+              plan TEXT,
+              started_at TIMESTAMP,
+              expires_at TIMESTAMP
+            );
+        `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS templates (
+              id TEXT PRIMARY KEY,       
+              name TEXT,
+              description TEXT,
+              keywords JSONB,
+              sources JSONB,
+              user_urls JSONB,
+              area JSONB,
+              delivery JSONB,
+              notes TEXT,
+              created_at TIMESTAMP DEFAULT now()
+            );
+        `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS alerts (
+              id SERIAL PRIMARY KEY,
+              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              name TEXT,
+              keywords JSONB,
+              area JSONB,
+              delivery JSONB,
+              frequency_minutes INTEGER,
+              sensitivity TEXT,
+              last_run TIMESTAMP,
+              created_at TIMESTAMP DEFAULT now(),
+              paused BOOLEAN DEFAULT false
+            );
+        `);
+        console.log('✅ All PostgreSQL tables created/verified!');
+    } catch (err) {
+        console.error('❌ Database migration error:', err.stack);
+        // Exit process if migration fails to prevent server from running broken
+        process.exit(1);
+    } finally {
+        client.release();
+    }
+}
+// Run migrations before starting the server listener
+runMigrations().then(() => {
+    // Only start the server if migrations succeeded
+    app.listen(PORT, () => console.log(`Atlas Notify running on ${PORT}`));
+}).catch(err => {
+    console.error('SERVER FAILED TO START AFTER MIGRATION FAILURE:', err.message);
+    process.exit(1);
+});
+// END OF MIGRATION BLOCK
+
+
+// --- Express Routes ---
 
 // Middleware for all JSON endpoints (except webhooks)
 app.use(express.json());
@@ -142,5 +212,3 @@ async function sendDiscordNotification(content) {
         body: JSON.stringify({ content })
     });
 }
-
-app.listen(PORT, () => console.log(`Atlas Notify running on ${PORT}`));
